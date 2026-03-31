@@ -35,6 +35,13 @@ PROPOSAL.md
 
 # Local data (not for public distribution)
 examples/
-tests/
 textbook/
 tmp/
+
+# Tests: only publish test_conversions.py (exclude batch/db data)
+tests/db/
+tests/batch_*
+tests/build_*
+tests/harvest_*
+tests/run_*
+tests/test_cir_to_schemdraw.py
