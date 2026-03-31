@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "schemdraw-ltspice-circuit-lab": {
+      "command": "python",
+      "args": ["S:/ltspice/01_GitHub/mcp-server/server.py"]
+    }
+  }
+}
