@@ -178,8 +178,6 @@ src/
   schemdraw_to_ltspice.py   schemdraw → .asc
 ```
 
-For the MCP server (AI-assisted circuit design with Claude), see [MCP-SERVER.md](MCP-SERVER.md).
-
 ## License
 
 MIT License

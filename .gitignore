@@ -37,6 +37,7 @@ PROPOSAL.md
 examples/
 textbook/
 tmp/
+mcp-server/
 
 # Tests: only publish test_conversions.py (exclude batch/db data)
 tests/db/
