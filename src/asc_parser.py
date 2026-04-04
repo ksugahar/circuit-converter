@@ -1012,7 +1012,10 @@ class NetlistExtractor:
             node2 = self._get_node_at(terms[1])
 
             if sym.symbol_type in ('voltage', 'current', 'battery'):
-                return f'{name} {node1} {node2} {value}'.strip()
+                line = f'{name} {node1} {node2} {value}'
+                if sym.value2:
+                    line += f' {sym.value2}'
+                return line.strip()
             elif sym.symbol_type in ('res', 'cap', 'ind', 'ind2', 'polcap'):
                 return f'{name} {node1} {node2} {value}'.strip()
             elif sym.symbol_type in ('diode', 'schottky', 'zener', 'led',
