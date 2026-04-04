@@ -751,12 +751,11 @@ class AscGenerator:
         for pc in placed:
             self._write_symbol(pc)
 
-        # ディレクティブ
+        # ディレクティブ（.xxx および K文）
         directive_y = sheet_height - 100
         for i, directive in enumerate(parser.directives):
             text = directive.text
-            # .paramは除外（set_parameterで処理すべき）
-            if text.startswith('.'):
+            if text.startswith('.') or text[0].upper() == 'K':
                 self.lines.append(
                     f'TEXT 0 {directive_y + i * 32} Left 2 !{text}'
                 )
