@@ -49,9 +49,10 @@ class Component:
     """パースされたコンポーネント"""
     name: str                    # R1, C1, V1 etc.
     comp_type: ComponentType
-    node_pos: str                # 正端子ノード名
-    node_neg: str                # 負端子ノード名
+    node_pos: str                # 正端子ノード名 (C/D)
+    node_neg: str                # 負端子ノード名 (E/S)
     value: str                   # 値（文字列のまま保持）
+    node_ctrl: str = ''          # 制御端子ノード名 (B/G) — 3端子素子用
     raw_line: str = ''           # 元のネットリスト行
 
 
@@ -167,20 +168,23 @@ class NetlistParser:
         comp_type = self.TYPE_MAP[first_char]
 
         # 3端子素子: Q C B E model / M D G S B model / J D G S model
+        node_ctrl = ''
         if comp_type in (ComponentType.BJT, ComponentType.JFET):
             if len(parts) >= 5:
                 # Q name C B E model
                 node_pos = parts[1]  # Collector/Drain
+                node_ctrl = parts[2]  # Base/Gate
                 node_neg = parts[3]  # Emitter/Source
-                value = parts[4] if len(parts) > 4 else ''  # model name only
+                value = parts[4] if len(parts) > 4 else ''
             else:
                 return None
         elif comp_type == ComponentType.MOSFET:
             if len(parts) >= 6:
                 # M name D G S B model
                 node_pos = parts[1]  # Drain
+                node_ctrl = parts[2]  # Gate
                 node_neg = parts[3]  # Source
-                value = parts[5] if len(parts) > 5 else ''  # model name only
+                value = parts[5] if len(parts) > 5 else ''
             else:
                 return None
         elif comp_type == ComponentType.COUPLED:
@@ -209,6 +213,7 @@ class NetlistParser:
             node_pos=node_pos,
             node_neg=node_neg,
             value=value,
+            node_ctrl=node_ctrl,
             raw_line=line,
         )
 
@@ -218,6 +223,8 @@ class NetlistParser:
         for comp in self.components:
             nodes.add(comp.node_pos)
             nodes.add(comp.node_neg)
+            if comp.node_ctrl:
+                nodes.add(comp.node_ctrl)
         return nodes
 
     def get_ground_nodes(self) -> Set[str]:
@@ -248,15 +255,17 @@ class PlacedComponent:
     x: int = 0              # LTSpiceシンボル座標
     y: int = 0              # LTSpiceシンボル座標
     rotation: str = 'R0'    # R0, R90, R180, R270
-    terminal1: Tuple[int, int] = (0, 0)  # 正端子座標
-    terminal2: Tuple[int, int] = (0, 0)  # 負端子座標
+    terminal1: Tuple[int, int] = (0, 0)  # 正端子座標 (C/D)
+    terminal2: Tuple[int, int] = (0, 0)  # 負端子座標 (E/S)
+    terminal3: Optional[Tuple[int, int]] = None  # 制御端子座標 (B/G)
 
 
 # アンカーポイントオフセット（シンボル座標→端子座標）
 # asc_parser.py の正規テーブルを使用（.asy実測値ベース）
 from asc_parser import TERMINAL_OFFSETS as _ASC_OFFSETS
+from asc_parser import TERMINAL_OFFSETS_3 as _ASC_OFFSETS_3
 
-# ComponentType → asc_parser シンボル名のマッピング
+# ComponentType → asc_parser シンボル名のマッピング (2端子)
 _TYPE_TO_SYM = {
     ComponentType.RESISTOR: 'res',
     ComponentType.CAPACITOR: 'cap',
@@ -266,10 +275,23 @@ _TYPE_TO_SYM = {
     ComponentType.DIODE: 'diode',
 }
 
+# 3端子素子のマッピング
+_TYPE_TO_SYM_3 = {
+    ComponentType.BJT: 'npn',     # デフォルト、PNPは配置時にモデル名で判定
+    ComponentType.MOSFET: 'nmos',
+    ComponentType.JFET: 'njf',
+}
+
 ANCHOR_OFFSETS = {}
 for ct, sym_name in _TYPE_TO_SYM.items():
     if sym_name in _ASC_OFFSETS:
         ANCHOR_OFFSETS[ct] = _ASC_OFFSETS[sym_name]
+
+# 3端子素子のオフセット（pin1=C/D, pin2=B/G, pin3=E/S）
+ANCHOR_OFFSETS_3 = {}
+for ct, sym_name in _TYPE_TO_SYM_3.items():
+    if sym_name in _ASC_OFFSETS_3:
+        ANCHOR_OFFSETS_3[ct] = _ASC_OFFSETS_3[sym_name]
 
 # 端子間距離（pin1-pin2 の距離、R0方向）
 COMPONENT_SPAN = {}
@@ -278,6 +300,11 @@ for ct, sym_name in _TYPE_TO_SYM.items():
     if offs:
         p1, p2 = offs
         COMPONENT_SPAN[ct] = abs(p2[1] - p1[1])
+for ct, sym_name in _TYPE_TO_SYM_3.items():
+    if sym_name in _ASC_OFFSETS_3:
+        offs = _ASC_OFFSETS_3[sym_name].get('R0')
+        if offs:
+            COMPONENT_SPAN[ct] = abs(offs[2][1] - offs[0][1])  # C/D to E/S
 
 GRID = 16  # LTSpiceグリッド
 
@@ -289,21 +316,12 @@ def snap(val: float) -> int:
 
 def calc_symbol_placement(comp_type: ComponentType, rotation: str,
                            t1: Tuple[int, int], t2: Tuple[int, int]):
-    """端子座標からシンボル配置位置を逆算
-
-    t1 = node_pos 端子の目標座標
-    t2 = node_neg 端子の目標座標
-    off1, off2 = anchor からの pin1, pin2 オフセット
-
-    anchor = t1 - off1 （pin1 を t1 に合わせる）
-    """
+    """端子座標からシンボル配置位置を逆算（2端子）"""
     offsets = ANCHOR_OFFSETS.get(comp_type, {}).get(rotation)
     if offsets is None:
         return (t1[0], t1[1], t1, t2)
 
     off1, off2 = offsets
-
-    # pin1 を t1 に合わせてアンカー位置を逆算
     sym_x = snap(t1[0] - off1[0])
     sym_y = snap(t1[1] - off1[1])
 
@@ -311,6 +329,29 @@ def calc_symbol_placement(comp_type: ComponentType, rotation: str,
     actual_t2 = (sym_x + off2[0], sym_y + off2[1])
 
     return (sym_x, sym_y, actual_t1, actual_t2)
+
+
+def calc_symbol_placement_3t(comp_type: ComponentType, rotation: str,
+                              t1: Tuple[int, int]):
+    """3端子素子の配置位置を逆算
+
+    t1 = node_pos (C/D) の目標座標。
+    3端子オフセット: (off_cd, off_bg, off_es)
+    Returns: (sym_x, sym_y, actual_cd, actual_bg, actual_es)
+    """
+    offsets = ANCHOR_OFFSETS_3.get(comp_type, {}).get(rotation)
+    if offsets is None:
+        return (t1[0], t1[1], t1, (t1[0], t1[1] + 48), (t1[0], t1[1] + 96))
+
+    off_cd, off_bg, off_es = offsets
+    sym_x = snap(t1[0] - off_cd[0])
+    sym_y = snap(t1[1] - off_cd[1])
+
+    actual_cd = (sym_x + off_cd[0], sym_y + off_cd[1])
+    actual_bg = (sym_x + off_bg[0], sym_y + off_bg[1])
+    actual_es = (sym_x + off_es[0], sym_y + off_es[1])
+
+    return (sym_x, sym_y, actual_cd, actual_bg, actual_es)
 
 
 class CircuitLayouter:
@@ -409,8 +450,11 @@ class CircuitLayouter:
                 if i in shift_set:
                     continue
                 comp = pc.component
-                for term, node in [(pc.terminal1, comp.node_pos),
-                                   (pc.terminal2, comp.node_neg)]:
+                term_list = [(pc.terminal1, comp.node_pos),
+                             (pc.terminal2, comp.node_neg)]
+                if pc.terminal3 is not None and comp.node_ctrl:
+                    term_list.append((pc.terminal3, comp.node_ctrl))
+                for term, node in term_list:
                     if term in term_owner:
                         existing_node, existing_idx = term_owner[term]
                         if existing_node != node:
@@ -429,7 +473,11 @@ class CircuitLayouter:
                 while True:
                     new_t1 = (pc.terminal1[0] + shift, pc.terminal1[1])
                     new_t2 = (pc.terminal2[0] + shift, pc.terminal2[1])
-                    if new_t1 not in all_terms and new_t2 not in all_terms:
+                    ok = new_t1 not in all_terms and new_t2 not in all_terms
+                    if ok and pc.terminal3 is not None:
+                        new_t3 = (pc.terminal3[0] + shift, pc.terminal3[1])
+                        ok = new_t3 not in all_terms
+                    if ok:
                         break
                     shift += self.H_SPACING
                 self._shift_component(idx, shift)
@@ -437,6 +485,8 @@ class CircuitLayouter:
                 pc2 = self.placed_components[idx]
                 all_terms.add(pc2.terminal1)
                 all_terms.add(pc2.terminal2)
+                if pc2.terminal3 is not None:
+                    all_terms.add(pc2.terminal3)
 
             if not has_overlap:
                 break
@@ -444,6 +494,9 @@ class CircuitLayouter:
     def _shift_component(self, idx: int, shift: int):
         """部品を水平にシフト"""
         pc = self.placed_components[idx]
+        t3 = None
+        if pc.terminal3 is not None:
+            t3 = (pc.terminal3[0] + shift, pc.terminal3[1])
         self.placed_components[idx] = PlacedComponent(
             component=pc.component,
             x=pc.x + shift,
@@ -451,6 +504,7 @@ class CircuitLayouter:
             rotation=pc.rotation,
             terminal1=(pc.terminal1[0] + shift, pc.terminal1[1]),
             terminal2=(pc.terminal2[0] + shift, pc.terminal2[1]),
+            terminal3=t3,
         )
 
     def _assign_positions(self, parser, sources, series_comps, shunt_comps,
@@ -532,14 +586,16 @@ class CircuitLayouter:
 
             # このノードに接続された他の信号ノードを探す
             for comp in parser.components:
-                neighbor = None
-                if comp.node_pos == node and comp.node_neg not in ground_nodes:
-                    neighbor = comp.node_neg
-                elif comp.node_neg == node and comp.node_pos not in ground_nodes:
-                    neighbor = comp.node_pos
-
-                if neighbor and neighbor not in visited:
-                    queue.append(neighbor)
+                neighbors = []
+                all_nodes = [comp.node_pos, comp.node_neg]
+                if comp.node_ctrl:
+                    all_nodes.append(comp.node_ctrl)
+                for n in all_nodes:
+                    if n == node:
+                        continue
+                    if n not in ground_nodes and n not in visited:
+                        neighbors.append(n)
+                queue.extend(neighbors)
 
         # 残りの信号ノード（到達できなかったもの）
         all_signal = parser.get_signal_nodes()
@@ -641,7 +697,36 @@ class CircuitLayouter:
         else:
             rotation = 'R0'
 
-        # シンボル位置を計算
+        # 3端子素子の処理
+        is_3t = comp.comp_type in (ComponentType.BJT, ComponentType.MOSFET,
+                                    ComponentType.JFET)
+        if is_3t:
+            # 3端子: C/D を上（pos_node）、E/S を下（GND or neg_node）に配置
+            # B/G は左に出る（R0配置の場合）
+            ctrl_node = self.node_positions.get(comp.node_ctrl, NodePosition(0, 0))
+
+            # C/D 端子の目標座標
+            t1_cd = (pos_node.x + ox, pos_node.y)
+            if pos_is_gnd:
+                t1_cd = (neg_node.x + ox, self.GND_Y)
+
+            # R0 固定（縦配置）
+            rotation = 'R0'
+
+            sym_x, sym_y, actual_cd, actual_bg, actual_es = \
+                calc_symbol_placement_3t(comp.comp_type, rotation, t1_cd)
+
+            return PlacedComponent(
+                component=comp,
+                x=sym_x,
+                y=sym_y,
+                rotation=rotation,
+                terminal1=actual_cd,
+                terminal2=actual_es,
+                terminal3=actual_bg,
+            )
+
+        # 2端子: シンボル位置を計算
         sym_x, sym_y, actual_t1, actual_t2 = calc_symbol_placement(
             comp.comp_type, rotation, t1, t2)
 
@@ -734,6 +819,8 @@ class AscGenerator:
             comp = pc.component
             node_terminal_map.setdefault(comp.node_pos, []).append(pc.terminal1)
             node_terminal_map.setdefault(comp.node_neg, []).append(pc.terminal2)
+            if pc.terminal3 is not None and comp.node_ctrl:
+                node_terminal_map.setdefault(comp.node_ctrl, []).append(pc.terminal3)
 
         ground_nodes = parser.get_ground_nodes()
 
@@ -766,6 +853,21 @@ class AscGenerator:
         """コンポーネントシンボルを書き出す"""
         comp = pc.component
         sym_name = self.SYMBOL_MAP.get(comp.comp_type, 'res')
+
+        # PNP/PMOS/PJF 判定: モデル名に "pnp"/"pmos"/"pjf" が含まれるか、
+        # または名前のプレフィックスから推定
+        if comp.comp_type == ComponentType.BJT:
+            val_lower = (comp.value or '').lower()
+            if 'pnp' in val_lower or comp.name.upper().startswith('QP'):
+                sym_name = 'pnp'
+        elif comp.comp_type == ComponentType.MOSFET:
+            val_lower = (comp.value or '').lower()
+            if 'pmos' in val_lower or 'pch' in val_lower:
+                sym_name = 'pmos'
+        elif comp.comp_type == ComponentType.JFET:
+            val_lower = (comp.value or '').lower()
+            if 'pjf' in val_lower:
+                sym_name = 'pjf'
 
         self.lines.append(f'SYMBOL {sym_name} {pc.x} {pc.y} {pc.rotation}')
 

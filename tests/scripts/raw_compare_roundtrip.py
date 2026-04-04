@@ -291,7 +291,14 @@ def move_to_failed(name, result, work_dir, asc_path):
     dest = FAILED_DIR / name
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
-    shutil.move(str(case_dir), str(dest))
+    try:
+        shutil.move(str(case_dir), str(dest))
+    except (PermissionError, OSError):
+        # LTspiceプロセスがファイルをロックしている場合、コピーで代替
+        try:
+            shutil.copytree(str(case_dir), str(dest), dirs_exist_ok=True)
+        except Exception:
+            dest.mkdir(parents=True, exist_ok=True)
 
     # 失敗理由を保存
     info = classify_asc(str(asc_path))
