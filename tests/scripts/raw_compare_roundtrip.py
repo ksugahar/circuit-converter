@@ -32,6 +32,8 @@ from netlist_to_asc import NetlistToAsc
 
 EXAMPLES_DIR = Path(__file__).parent.parent.parent / 'examples' / 'ltspice_bundled'
 RESULTS_DIR = Path(__file__).parent.parent / 'db' / 'raw_compare'
+VERIFIED_DIR = Path(__file__).parent.parent / 'db' / 'verified'
+FAILED_DIR = Path(__file__).parent.parent / 'db' / 'failed'
 
 # --- LTspice runner (from batch_roundtrip_github.py) ---
 
@@ -232,6 +234,113 @@ def run_one(asc_path, ltspice_exe, work_dir):
     return result
 
 
+def save_to_verified(result, case_dir, asc_path):
+    """PASSした回路を verified DB に保存
+
+    3点セット: original.asc, converted.cir, original.raw
+    + meta.json（回路メタデータ）
+    """
+    name = result['name']
+    dest = VERIFIED_DIR / name
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # 3点セットをコピー
+    src_asc = case_dir / f'{name}_orig.asc'
+    src_cir = case_dir / f'{name}.cir'
+    src_raw = case_dir / f'{name}_orig.raw'
+    if not src_raw.exists():
+        src_raw = case_dir / f'{name}_orig.op.raw'
+
+    for src, dst_name in [(src_asc, 'original.asc'),
+                          (src_cir, 'converted.cir'),
+                          (src_raw, 'original.raw')]:
+        if src.exists():
+            shutil.copy2(src, dest / dst_name)
+
+    # 分類情報を取得
+    info = classify_asc(str(asc_path))
+
+    # メタデータ
+    cmp = result.get('comparison', {})
+    meta = {
+        'name': name,
+        'source': str(asc_path),
+        'source_dir': asc_path.parent.name,
+        'verified_at': datetime.now().isoformat(),
+        'symbol_types': info.get('symbol_types', []),
+        'num_symbols': info.get('num_symbols', 0),
+        'passive_only': info.get('passive_only', False),
+        'common_traces': cmp.get('common_traces', 0),
+        'trace_names': sorted(cmp.get('traces', {}).keys()),
+        'rtol': 1e-3,
+        'atol': 1e-6,
+    }
+
+    (dest / 'meta.json').write_text(
+        json.dumps(meta, indent=2, ensure_ascii=False), encoding='utf-8')
+
+    return dest
+
+
+def move_to_failed(name, result, work_dir, asc_path):
+    """失敗した回路を failed/ に移動（デバッグ用）"""
+    case_dir = work_dir / name
+    if not case_dir.exists():
+        return
+
+    dest = FAILED_DIR / name
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True)
+    shutil.move(str(case_dir), str(dest))
+
+    # 失敗理由を保存
+    info = classify_asc(str(asc_path))
+    fail_meta = {
+        'name': name,
+        'source': str(asc_path),
+        'status': result['status'],
+        'error': result.get('error', ''),
+        'tested_at': datetime.now().isoformat(),
+        'symbol_types': info.get('symbol_types', []),
+        'num_symbols': info.get('num_symbols', 0),
+        'passive_only': info.get('passive_only', False),
+    }
+    if 'comparison' in result:
+        cmp = result['comparison']
+        failed_traces = [k for k, v in cmp.get('traces', {}).items() if not v['match']]
+        fail_meta['failed_traces'] = failed_traces[:10]
+        fail_meta['common_traces'] = cmp.get('common_traces', 0)
+
+    (dest / 'fail_info.json').write_text(
+        json.dumps(fail_meta, indent=2, ensure_ascii=False), encoding='utf-8')
+
+
+def rebuild_catalog():
+    """verified/ 内の全 meta.json から catalog.json を再構築"""
+    if not VERIFIED_DIR.exists():
+        return
+
+    catalog = []
+    for meta_path in sorted(VERIFIED_DIR.glob('*/meta.json')):
+        try:
+            meta = json.loads(meta_path.read_text(encoding='utf-8'))
+            catalog.append({
+                'name': meta['name'],
+                'source_dir': meta.get('source_dir', ''),
+                'passive_only': meta.get('passive_only', False),
+                'num_symbols': meta.get('num_symbols', 0),
+                'common_traces': meta.get('common_traces', 0),
+                'verified_at': meta.get('verified_at', ''),
+            })
+        except Exception:
+            pass
+
+    catalog_path = VERIFIED_DIR / 'catalog.json'
+    catalog_path.write_text(
+        json.dumps(catalog, indent=2, ensure_ascii=False), encoding='utf-8')
+    print(f'\nCatalog: {len(catalog)} verified circuits -> {catalog_path}')
+
+
 def collect_targets(args):
     """Collect .asc files based on CLI args."""
     if args.file:
@@ -298,14 +407,19 @@ def main():
             counts['pass'] += 1
             cmp = r['comparison']
             print(f"PASS ({cmp['common_traces']} traces)")
+            # Verified DB に保存
+            case_dir = work_dir / name
+            save_to_verified(r, case_dir, asc_path)
         elif r['status'] == 'waveform_mismatch':
             counts['fail'] += 1
             cmp = r['comparison']
             failed = [k for k, v in cmp['traces'].items() if not v['match']]
             print(f"MISMATCH: {', '.join(failed[:3])}")
+            move_to_failed(name, r, work_dir, asc_path)
         else:
             counts['skip'] += 1
             print(f"{r['status']}: {r.get('error', '?')}")
+            move_to_failed(name, r, work_dir, asc_path)
 
     # Summary
     total = counts['pass'] + counts['fail']
@@ -315,6 +429,10 @@ def main():
     if counts['skip']:
         print(f'Skipped (sim/convert fail): {counts["skip"]}')
     print(f'{"="*60}')
+
+    # Verified catalog 再構築
+    if counts['pass'] > 0:
+        rebuild_catalog()
 
     # Save report
     report_path = RESULTS_DIR / 'report.json'
