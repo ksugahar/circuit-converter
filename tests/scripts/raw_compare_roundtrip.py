@@ -199,7 +199,7 @@ def run_one(asc_path, ltspice_exe, work_dir):
         return result
 
     rt_asc_path = case_dir / f'{name}_rt.asc'
-    rt_asc_path.write_text(rt_asc_text, encoding='utf-8')
+    rt_asc_path.write_text(rt_asc_text, encoding='latin-1', errors='replace')
 
     # Step 3.5: Check for overlapping components (causes LTspice GUI dialog)
     sym_positions = []
