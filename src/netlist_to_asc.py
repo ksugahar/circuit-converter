@@ -953,12 +953,18 @@ class AscGenerator:
 
         ground_nodes = parser.get_ground_nodes()
 
-        for node_name, terminals in node_terminal_map.items():
-            unique_pts = list(dict.fromkeys(terminals))
-            flag_name = '0' if node_name in ground_nodes else node_name
+        # スタブワイヤ端点にFLAGを配置
+        flag_positions = getattr(self, '_flag_positions', {})
+        placed_flags: Set[Tuple[int, int, str]] = set()
 
-            for pt in unique_pts:
-                self.lines.append(f'FLAG {pt[0]} {pt[1]} {flag_name}')
+        for node_name in node_terminal_map:
+            flag_name = '0' if node_name in ground_nodes else node_name
+            pts = flag_positions.get(node_name, [])
+            for pt in pts:
+                key = (pt[0], pt[1], flag_name)
+                if key not in placed_flags:
+                    placed_flags.add(key)
+                    self.lines.append(f'FLAG {pt[0]} {pt[1]} {flag_name}')
 
         # シンボル（コンポーネント）
         for pc in placed:
@@ -1011,14 +1017,85 @@ class AscGenerator:
     def _generate_wires(self, placed: List[PlacedComponent],
                          node_positions: Dict[str, NodePosition],
                          parser: NetlistParser) -> List[Tuple[int, int, int, int]]:
-        """ワイヤ（配線）を生成 — FLAGベース方式
+        """ワイヤ（配線）を生成 — FLAG + ピンスタブ方式
 
-        ワイヤ交差による短絡を防ぐため、長距離ワイヤは使わない。
-        各端子はFLAG（ネットラベル）経由で接続する。
-        ワイヤはシンボルピンからFLAG配置位置までの短い接続のみ。
+        FLAGはワイヤ端点上にないとLTspiceがピンに接続しない。
+        各ピンから短いスタブワイヤを引き、その端点にFLAGを配置する。
+        スタブは全て同じ方向（下向き16px）で、交差を最小限に。
         """
-        # ワイヤは不要 — 全接続はFLAGで行う
-        return []
+        wires = []
+        wire_set = set()
+        self._flag_positions = {}  # node_name -> list of (x, y) for FLAG
+
+        # 全ピン位置を収集
+        node_pins: Dict[str, List[Tuple[int, int]]] = {}
+        for pc in placed:
+            comp = pc.component
+            node_pins.setdefault(comp.node_pos, []).append(pc.terminal1)
+            node_pins.setdefault(comp.node_neg, []).append(pc.terminal2)
+            if pc.terminal3 is not None and comp.node_ctrl:
+                node_pins.setdefault(comp.node_ctrl, []).append(pc.terminal3)
+            if pc.terminal4 is not None and comp.node_ctrl2:
+                node_pins.setdefault(comp.node_ctrl2, []).append(pc.terminal4)
+
+        # 全ピン座標と全ワイヤセグメントを追跡
+        all_pin_coords = set()
+        for pts in node_pins.values():
+            all_pin_coords.update(pts)
+
+        # スタブ端点とワイヤセグメントの追跡（T字接続回避）
+        occupied_points = set(all_pin_coords)
+        placed_segments: List[Tuple[int, int, int, int]] = []
+
+        def point_on_segment(px, py, x1, y1, x2, y2):
+            """点(px,py)がワイヤ(x1,y1)-(x2,y2)上にあるか（端点除く）"""
+            if y1 == y2 == py:  # 水平
+                return min(x1, x2) < px < max(x1, x2)
+            if x1 == x2 == px:  # 垂直
+                return min(y1, y2) < py < max(y1, y2)
+            return False
+
+        def is_safe_stub(pt, stub_end):
+            """スタブ端点が既存ワイヤ上にないか確認"""
+            if stub_end in occupied_points:
+                return False
+            # スタブ端点が既存ワイヤセグメントの中間にないか
+            for seg in placed_segments:
+                if point_on_segment(stub_end[0], stub_end[1], *seg):
+                    return False
+            # 新スタブワイヤが既存のスタブ端点を通過しないか
+            for seg_end in occupied_points - all_pin_coords:
+                if point_on_segment(seg_end[0], seg_end[1],
+                                   pt[0], pt[1], stub_end[0], stub_end[1]):
+                    return False
+            return True
+
+        for node_name, pins in node_pins.items():
+            unique_pts = list(dict.fromkeys(pins))
+            flag_pts = []
+
+            for pt in unique_pts:
+                stub_end = None
+                for dx, dy in [(0, 16), (0, -16), (-16, 0), (16, 0),
+                               (0, 32), (0, -32), (-32, 0), (32, 0)]:
+                    candidate = (pt[0] + dx, pt[1] + dy)
+                    if is_safe_stub(pt, candidate):
+                        stub_end = candidate
+                        break
+                if stub_end is None:
+                    stub_end = (pt[0], pt[1] + 16)  # fallback
+
+                w = (pt[0], pt[1], stub_end[0], stub_end[1])
+                if w not in wire_set:
+                    wire_set.add(w)
+                    wires.append(w)
+                    placed_segments.append(w)
+                occupied_points.add(stub_end)
+                flag_pts.append(stub_end)
+
+            self._flag_positions[node_name] = flag_pts
+
+        return wires
 
     def _make_orthogonal_wires(self, x1: int, y1: int,
                                 x2: int, y2: int
