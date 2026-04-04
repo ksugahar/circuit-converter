@@ -253,43 +253,31 @@ class PlacedComponent:
 
 
 # アンカーポイントオフセット（シンボル座標→端子座標）
-ANCHOR_OFFSETS = {
-    ComponentType.RESISTOR: {
-        'R0':   ((16, 0), (16, 64)),
-        'R90':  ((-64, 16), (0, 16)),
-        'R180': ((16, 64), (16, 0)),
-        'R270': ((64, 16), (0, 16)),
-    },
-    ComponentType.CAPACITOR: {
-        'R0':   ((16, 0), (16, 64)),
-        'R90':  ((-64, 16), (0, 16)),
-        'R180': ((16, 64), (16, 0)),
-        'R270': ((64, 16), (0, 16)),
-    },
-    ComponentType.INDUCTOR: {
-        'R0':   ((16, -16), (16, 96)),
-        'R90':  ((-96, 16), (0, 16)),
-        'R180': ((16, 112), (16, 0)),
-        'R270': ((96, 16), (0, 16)),
-    },
-    ComponentType.VOLTAGE: {
-        'R0':   ((0, 0), (0, 96)),
-        'R180': ((0, 96), (0, 0)),
-    },
-    ComponentType.CURRENT: {
-        'R0':   ((16, 0), (16, 96)),
-        'R180': ((0, -64), (0, 64)),
-    },
+# asc_parser.py の正規テーブルを使用（.asy実測値ベース）
+from asc_parser import TERMINAL_OFFSETS as _ASC_OFFSETS
+
+# ComponentType → asc_parser シンボル名のマッピング
+_TYPE_TO_SYM = {
+    ComponentType.RESISTOR: 'res',
+    ComponentType.CAPACITOR: 'cap',
+    ComponentType.INDUCTOR: 'ind',
+    ComponentType.VOLTAGE: 'voltage',
+    ComponentType.CURRENT: 'current',
+    ComponentType.DIODE: 'diode',
 }
 
-# 端子間距離
-COMPONENT_SPAN = {
-    ComponentType.RESISTOR: 64,
-    ComponentType.CAPACITOR: 64,
-    ComponentType.INDUCTOR: 112,
-    ComponentType.VOLTAGE: 96,
-    ComponentType.CURRENT: 96,
-}
+ANCHOR_OFFSETS = {}
+for ct, sym_name in _TYPE_TO_SYM.items():
+    if sym_name in _ASC_OFFSETS:
+        ANCHOR_OFFSETS[ct] = _ASC_OFFSETS[sym_name]
+
+# 端子間距離（pin1-pin2 の距離、R0方向）
+COMPONENT_SPAN = {}
+for ct, sym_name in _TYPE_TO_SYM.items():
+    offs = _ASC_OFFSETS.get(sym_name, {}).get('R0')
+    if offs:
+        p1, p2 = offs
+        COMPONENT_SPAN[ct] = abs(p2[1] - p1[1])
 
 GRID = 16  # LTSpiceグリッド
 
@@ -301,43 +289,23 @@ def snap(val: float) -> int:
 
 def calc_symbol_placement(comp_type: ComponentType, rotation: str,
                            t1: Tuple[int, int], t2: Tuple[int, int]):
-    """端子座標からシンボル配置位置を逆算"""
+    """端子座標からシンボル配置位置を逆算
+
+    t1 = node_pos 端子の目標座標
+    t2 = node_neg 端子の目標座標
+    off1, off2 = anchor からの pin1, pin2 オフセット
+
+    anchor = t1 - off1 （pin1 を t1 に合わせる）
+    """
     offsets = ANCHOR_OFFSETS.get(comp_type, {}).get(rotation)
     if offsets is None:
         return (t1[0], t1[1], t1, t2)
 
     off1, off2 = offsets
 
-    # シンボル位置を端子位置から逆算
-    if rotation == 'R90':
-        # R90: アンカーは右端子（off2）側
-        sym_x = t2[0] - off2[0]
-        sym_y = t2[1] - off2[1]
-    elif rotation == 'R270':
-        sym_x = t1[0] - off2[0]
-        sym_y = t1[1] - off2[1]
-    elif comp_type in (ComponentType.VOLTAGE,):
-        # 電圧源R0: off1=(0,0)は正端子（上）
-        if rotation == 'R0':
-            sym_x = t1[0] - off1[0]
-            sym_y = t1[1] - off1[1]
-        else:
-            sym_x = t2[0] - off2[0]
-            sym_y = t2[1] - off2[1]
-    elif comp_type in (ComponentType.CURRENT,):
-        # 電流源R180: 上端子=off1, 下端子=off2
-        if rotation == 'R180':
-            sym_x = t2[0] - off2[0]
-            sym_y = t2[1] - off2[1]
-        else:
-            sym_x = t1[0] - off1[0]
-            sym_y = t1[1] - off1[1]
-    else:
-        sym_x = t1[0] - off1[0]
-        sym_y = t1[1] - off1[1]
-
-    sym_x = snap(sym_x)
-    sym_y = snap(sym_y)
+    # pin1 を t1 に合わせてアンカー位置を逆算
+    sym_x = snap(t1[0] - off1[0])
+    sym_y = snap(t1[1] - off1[1])
 
     actual_t1 = (sym_x + off1[0], sym_y + off1[1])
     actual_t2 = (sym_x + off2[0], sym_y + off2[1])
@@ -407,7 +375,83 @@ class CircuitLayouter:
             placed = self._place_component(comp, ground_nodes, offset)
             self.placed_components.append(placed)
 
+        # Step 5: 重複解消 — 同一座標の部品を水平にずらす
+        self._resolve_overlaps()
+
         return self
+
+    def _resolve_overlaps(self):
+        """部品重複と端子衝突を解消
+
+        1. 同一座標のシンボルを水平にずらす
+        2. 異なるノードの端子が同一座標にならないよう調整
+        """
+        for _ in range(20):
+            # Phase 1: シンボル位置の重複
+            occupied: Dict[Tuple[int, int], List[int]] = {}
+            for i, pc in enumerate(self.placed_components):
+                key = (pc.x, pc.y)
+                occupied.setdefault(key, []).append(i)
+
+            has_overlap = False
+            for key, indices in occupied.items():
+                if len(indices) <= 1:
+                    continue
+                has_overlap = True
+                for rank, idx in enumerate(indices[1:], 1):
+                    shift = rank * self.H_SPACING
+                    self._shift_component(idx, shift)
+
+            # Phase 2: 端子座標の衝突（異なるノードが同一座標）
+            term_owner: Dict[Tuple[int, int], Tuple[str, int]] = {}  # coord -> (node, comp_idx)
+            shift_set: Set[int] = set()
+            for i, pc in enumerate(self.placed_components):
+                if i in shift_set:
+                    continue
+                comp = pc.component
+                for term, node in [(pc.terminal1, comp.node_pos),
+                                   (pc.terminal2, comp.node_neg)]:
+                    if term in term_owner:
+                        existing_node, existing_idx = term_owner[term]
+                        if existing_node != node:
+                            has_overlap = True
+                            shift_set.add(i)
+                            break
+                    else:
+                        term_owner[term] = (node, i)
+
+            # 衝突する部品を既存の全端子座標から離れた位置にシフト
+            all_terms = set(term_owner.keys())
+            for idx in sorted(shift_set):
+                pc = self.placed_components[idx]
+                # 右方向に空き位置を探す
+                shift = self.H_SPACING
+                while True:
+                    new_t1 = (pc.terminal1[0] + shift, pc.terminal1[1])
+                    new_t2 = (pc.terminal2[0] + shift, pc.terminal2[1])
+                    if new_t1 not in all_terms and new_t2 not in all_terms:
+                        break
+                    shift += self.H_SPACING
+                self._shift_component(idx, shift)
+                # 新端子を登録
+                pc2 = self.placed_components[idx]
+                all_terms.add(pc2.terminal1)
+                all_terms.add(pc2.terminal2)
+
+            if not has_overlap:
+                break
+
+    def _shift_component(self, idx: int, shift: int):
+        """部品を水平にシフト"""
+        pc = self.placed_components[idx]
+        self.placed_components[idx] = PlacedComponent(
+            component=pc.component,
+            x=pc.x + shift,
+            y=pc.y,
+            rotation=pc.rotation,
+            terminal1=(pc.terminal1[0] + shift, pc.terminal1[1]),
+            terminal2=(pc.terminal2[0] + shift, pc.terminal2[1]),
+        )
 
     def _assign_positions(self, parser, sources, series_comps, shunt_comps,
                            ground_nodes):
@@ -684,21 +728,24 @@ class AscGenerator:
         for w in wires:
             self.lines.append(f'WIRE {w[0]} {w[1]} {w[2]} {w[3]}')
 
-        # フラグ（GND、ネットラベル）
-        ground_nodes = parser.get_ground_nodes()
-        for gnd in ground_nodes:
-            if gnd in node_positions:
-                pos = node_positions[gnd]
-                gx, gy = self._snap(pos.x), self._snap(pos.y)
-                self.lines.append(f'FLAG {gx} {gy} 0')
+        # 全端子にFLAGを配置（ワイヤレス接続）
+        node_terminal_map: Dict[str, List[Tuple[int, int]]] = {}
+        for pc in placed:
+            comp = pc.component
+            node_terminal_map.setdefault(comp.node_pos, []).append(pc.terminal1)
+            node_terminal_map.setdefault(comp.node_neg, []).append(pc.terminal2)
 
-        # 信号ノードのラベル（ソース接続以外のユニークノード）
-        labeled_nodes = self._find_label_nodes(parser)
-        for node_name in labeled_nodes:
-            if node_name in node_positions:
-                pos = node_positions[node_name]
-                nx, ny = self._snap(pos.x), self._snap(pos.y)
-                self.lines.append(f'FLAG {nx} {ny} {node_name}')
+        ground_nodes = parser.get_ground_nodes()
+
+        for node_name, terminals in node_terminal_map.items():
+            unique_pts = list(dict.fromkeys(terminals))
+            if node_name in ground_nodes:
+                flag_name = '0'
+            else:
+                flag_name = node_name
+
+            for pt in unique_pts:
+                self.lines.append(f'FLAG {pt[0]} {pt[1]} {flag_name}')
 
         # シンボル（コンポーネント）
         for pc in placed:
@@ -737,40 +784,14 @@ class AscGenerator:
     def _generate_wires(self, placed: List[PlacedComponent],
                          node_positions: Dict[str, NodePosition],
                          parser: NetlistParser) -> List[Tuple[int, int, int, int]]:
-        """ワイヤ（配線）を生成
+        """ワイヤ（配線）を生成 — FLAGベース方式
 
-        各コンポーネントの端子からノード位置へのワイヤを生成。
-        同一座標のワイヤ（長さ0）は除外。重複も除外。
+        ワイヤ交差による短絡を防ぐため、長距離ワイヤは使わない。
+        各端子はFLAG（ネットラベル）経由で接続する。
+        ワイヤはシンボルピンからFLAG配置位置までの短い接続のみ。
         """
-        wires = []
-        wire_set = set()
-
-        for pc in placed:
-            comp = pc.component
-
-            # 端子1 → node_pos
-            if comp.node_pos in node_positions:
-                node_pos = node_positions[comp.node_pos]
-                nx, ny = self._snap(node_pos.x), self._snap(node_pos.y)
-                t1x, t1y = pc.terminal1
-                wire = self._make_orthogonal_wires(t1x, t1y, nx, ny)
-                for w in wire:
-                    if w not in wire_set:
-                        wire_set.add(w)
-                        wires.append(w)
-
-            # 端子2 → node_neg
-            if comp.node_neg in node_positions:
-                node_pos = node_positions[comp.node_neg]
-                nx, ny = self._snap(node_pos.x), self._snap(node_pos.y)
-                t2x, t2y = pc.terminal2
-                wire = self._make_orthogonal_wires(t2x, t2y, nx, ny)
-                for w in wire:
-                    if w not in wire_set:
-                        wire_set.add(w)
-                        wires.append(w)
-
-        return wires
+        # ワイヤは不要 — 全接続はFLAGで行う
+        return []
 
     def _make_orthogonal_wires(self, x1: int, y1: int,
                                 x2: int, y2: int
