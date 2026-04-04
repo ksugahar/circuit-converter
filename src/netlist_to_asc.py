@@ -142,8 +142,8 @@ class NetlistParser:
                 self.directives.append(SpiceDirective(text=line))
                 continue
 
-            # K文（結合定数）はディレクティブとして扱う
-            if line[0].upper() == 'K':
+            # K文（結合定数）/ A文（デジタル素子）はディレクティブとして扱う
+            if line[0].upper() in ('K', 'A'):
                 self.directives.append(SpiceDirective(text=line))
                 continue
 
@@ -939,7 +939,8 @@ class AscGenerator:
         for w in wires:
             self.lines.append(f'WIRE {w[0]} {w[1]} {w[2]} {w[3]}')
 
-        # 全端子にFLAGを配置（ワイヤレス接続）
+        # 全端子にスタブワイヤ + FLAGを配置
+        # LTspiceはFLAGがワイヤ端点上にないとピンに接続しない
         node_terminal_map: Dict[str, List[Tuple[int, int]]] = {}
         for pc in placed:
             comp = pc.component
@@ -954,10 +955,7 @@ class AscGenerator:
 
         for node_name, terminals in node_terminal_map.items():
             unique_pts = list(dict.fromkeys(terminals))
-            if node_name in ground_nodes:
-                flag_name = '0'
-            else:
-                flag_name = node_name
+            flag_name = '0' if node_name in ground_nodes else node_name
 
             for pt in unique_pts:
                 self.lines.append(f'FLAG {pt[0]} {pt[1]} {flag_name}')
@@ -966,11 +964,11 @@ class AscGenerator:
         for pc in placed:
             self._write_symbol(pc)
 
-        # ディレクティブ（.xxx および K文）
+        # ディレクティブ（.xxx, K文, A文）
         directive_y = sheet_height - 100
         for i, directive in enumerate(parser.directives):
             text = directive.text
-            if text.startswith('.') or text[0].upper() == 'K':
+            if text.startswith('.') or text[0].upper() in ('K', 'A'):
                 self.lines.append(
                     f'TEXT 0 {directive_y + i * 32} Left 2 !{text}'
                 )
