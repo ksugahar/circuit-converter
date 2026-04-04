@@ -142,8 +142,15 @@ class NetlistParser:
                 self.directives.append(SpiceDirective(text=line))
                 continue
 
-            # K文（結合定数）/ A文（デジタル素子）はディレクティブとして扱う
-            if line[0].upper() in ('K', 'A'):
+            # K文（結合定数）/ A文（デジタル素子）/ U文（サブサーキット/opamp）
+            # はディレクティブとして扱う
+            if line[0].upper() in ('K', 'A', 'U'):
+                self.directives.append(SpiceDirective(text=line))
+                continue
+
+            # J文が3パーツ以下 = ピン割り当て（JFET Q D G S modelは5パーツ）
+            parts_check = line.split()
+            if line[0].upper() == 'J' and len(parts_check) < 5:
                 self.directives.append(SpiceDirective(text=line))
                 continue
 
@@ -173,11 +180,11 @@ class NetlistParser:
         node_ctrl2 = ''
         if comp_type in (ComponentType.BJT, ComponentType.JFET):
             if len(parts) >= 5:
-                # Q name C B E model
+                # Q name C B E model [params...]
                 node_pos = parts[1]  # Collector/Drain
                 node_ctrl = parts[2]  # Base/Gate
                 node_neg = parts[3]  # Emitter/Source
-                value = parts[4] if len(parts) > 4 else ''
+                value = ' '.join(parts[4:])  # model + optional params
             else:
                 return None
         elif comp_type == ComponentType.MOSFET:
@@ -970,11 +977,11 @@ class AscGenerator:
         for pc in placed:
             self._write_symbol(pc)
 
-        # ディレクティブ（.xxx, K文, A文）
+        # ディレクティブ（.xxx, K文, A文, U文）
         directive_y = sheet_height - 100
         for i, directive in enumerate(parser.directives):
             text = directive.text
-            if text.startswith('.') or text[0].upper() in ('K', 'A'):
+            if text.startswith('.') or (text and text[0].upper() in ('K', 'A', 'U', 'J')):
                 self.lines.append(
                     f'TEXT 0 {directive_y + i * 32} Left 2 !{text}'
                 )
