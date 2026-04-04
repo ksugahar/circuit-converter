@@ -49,10 +49,11 @@ class Component:
     """パースされたコンポーネント"""
     name: str                    # R1, C1, V1 etc.
     comp_type: ComponentType
-    node_pos: str                # 正端子ノード名 (C/D)
-    node_neg: str                # 負端子ノード名 (E/S)
+    node_pos: str                # 正端子ノード名 (C/D/out+)
+    node_neg: str                # 負端子ノード名 (E/S/out-)
     value: str                   # 値（文字列のまま保持）
-    node_ctrl: str = ''          # 制御端子ノード名 (B/G) — 3端子素子用
+    node_ctrl: str = ''          # 制御端子+ (B/G/ctrl+) — 3/4端子素子用
+    node_ctrl2: str = ''         # 制御端子- (ctrl-) — 4端子素子用
     raw_line: str = ''           # 元のネットリスト行
 
 
@@ -169,6 +170,7 @@ class NetlistParser:
 
         # 3端子素子: Q C B E model / M D G S B model / J D G S model
         node_ctrl = ''
+        node_ctrl2 = ''
         if comp_type in (ComponentType.BJT, ComponentType.JFET):
             if len(parts) >= 5:
                 # Q name C B E model
@@ -198,6 +200,46 @@ class NetlistParser:
                 value = parts[-1]  # 最後がサブサーキット名
             else:
                 return None
+        elif comp_type in (ComponentType.VCVS, ComponentType.VCCS):
+            # E/G: 4端子 (out+ out- ctrl+ ctrl- gain) or Laplace (out+ out- Laplace=...)
+            node_pos = parts[1]
+            node_neg = parts[2]
+            rest = ' '.join(parts[3:])
+            if 'laplace' in rest.lower():
+                # Laplace型: 2端子出力のみ
+                value = rest
+            elif len(parts) >= 6:
+                # 通常型: E name out+ out- ctrl+ ctrl- gain
+                node_ctrl = parts[3]
+                node_ctrl2 = parts[4]
+                value = ' '.join(parts[5:])
+            else:
+                value = rest
+        elif comp_type == ComponentType.SWITCH:
+            # S name n+ n- ctrl+ ctrl- model
+            if len(parts) >= 6:
+                node_pos = parts[1]
+                node_neg = parts[2]
+                node_ctrl = parts[3]
+                node_ctrl2 = parts[4]
+                value = ' '.join(parts[5:])
+            else:
+                # 簡略形: S name n+ n- model (制御はモデル内で定義)
+                node_pos = parts[1]
+                node_neg = parts[2]
+                value = ' '.join(parts[3:])
+        elif comp_type == ComponentType.TLINE:
+            # T name port1+ port1- port2+ port2- params
+            if len(parts) >= 5:
+                node_pos = parts[1]
+                node_neg = parts[2]
+                node_ctrl = parts[3]
+                node_ctrl2 = parts[4]
+                value = ' '.join(parts[5:]) if len(parts) > 5 else ''
+            else:
+                node_pos = parts[1]
+                node_neg = parts[2] if len(parts) > 2 else '0'
+                value = ' '.join(parts[3:]) if len(parts) > 3 else ''
         else:
             # 2端子素子: name node+ node- value
             node_pos = parts[1]
@@ -214,6 +256,7 @@ class NetlistParser:
             node_neg=node_neg,
             value=value,
             node_ctrl=node_ctrl,
+            node_ctrl2=node_ctrl2,
             raw_line=line,
         )
 
@@ -225,6 +268,8 @@ class NetlistParser:
             nodes.add(comp.node_neg)
             if comp.node_ctrl:
                 nodes.add(comp.node_ctrl)
+            if comp.node_ctrl2:
+                nodes.add(comp.node_ctrl2)
         return nodes
 
     def get_ground_nodes(self) -> Set[str]:
@@ -257,13 +302,15 @@ class PlacedComponent:
     rotation: str = 'R0'    # R0, R90, R180, R270
     terminal1: Tuple[int, int] = (0, 0)  # 正端子座標 (C/D)
     terminal2: Tuple[int, int] = (0, 0)  # 負端子座標 (E/S)
-    terminal3: Optional[Tuple[int, int]] = None  # 制御端子座標 (B/G)
+    terminal3: Optional[Tuple[int, int]] = None  # 制御端子+ (B/G/ctrl+)
+    terminal4: Optional[Tuple[int, int]] = None  # 制御端子- (ctrl-)
 
 
 # アンカーポイントオフセット（シンボル座標→端子座標）
 # asc_parser.py の正規テーブルを使用（.asy実測値ベース）
 from asc_parser import TERMINAL_OFFSETS as _ASC_OFFSETS
 from asc_parser import TERMINAL_OFFSETS_3 as _ASC_OFFSETS_3
+from asc_parser import TERMINAL_OFFSETS_4 as _ASC_OFFSETS_4
 
 # ComponentType → asc_parser シンボル名のマッピング (2端子)
 _TYPE_TO_SYM = {
@@ -352,6 +399,34 @@ def calc_symbol_placement_3t(comp_type: ComponentType, rotation: str,
     actual_es = (sym_x + off_es[0], sym_y + off_es[1])
 
     return (sym_x, sym_y, actual_cd, actual_bg, actual_es)
+
+
+def calc_symbol_placement_4t(comp_type: ComponentType, rotation: str,
+                              t1: Tuple[int, int]):
+    """4端子素子の配置位置を逆算
+
+    t1 = 第1ピンの目標座標。
+    Returns: (sym_x, sym_y, pin1, pin2, pin3, pin4)
+    """
+    sym_map = {
+        ComponentType.VCVS: 'e', ComponentType.VCCS: 'g',
+        ComponentType.SWITCH: 'sw', ComponentType.TLINE: 'tline',
+    }
+    sym_name = sym_map.get(comp_type)
+    offsets = _ASC_OFFSETS_4.get(sym_name, {}).get(rotation) if sym_name else None
+    if offsets is None:
+        return (t1[0], t1[1], t1, (t1[0], t1[1]+96),
+                (t1[0]-48, t1[1]+32), (t1[0]-48, t1[1]+80))
+
+    off1, off2, off3, off4 = offsets
+    sym_x = snap(t1[0] - off1[0])
+    sym_y = snap(t1[1] - off1[1])
+
+    return (sym_x, sym_y,
+            (sym_x + off1[0], sym_y + off1[1]),
+            (sym_x + off2[0], sym_y + off2[1]),
+            (sym_x + off3[0], sym_y + off3[1]),
+            (sym_x + off4[0], sym_y + off4[1]))
 
 
 class CircuitLayouter:
@@ -454,6 +529,8 @@ class CircuitLayouter:
                              (pc.terminal2, comp.node_neg)]
                 if pc.terminal3 is not None and comp.node_ctrl:
                     term_list.append((pc.terminal3, comp.node_ctrl))
+                if pc.terminal4 is not None and comp.node_ctrl2:
+                    term_list.append((pc.terminal4, comp.node_ctrl2))
                 for term, node in term_list:
                     if term in term_owner:
                         existing_node, existing_idx = term_owner[term]
@@ -475,8 +552,9 @@ class CircuitLayouter:
                     new_t2 = (pc.terminal2[0] + shift, pc.terminal2[1])
                     ok = new_t1 not in all_terms and new_t2 not in all_terms
                     if ok and pc.terminal3 is not None:
-                        new_t3 = (pc.terminal3[0] + shift, pc.terminal3[1])
-                        ok = new_t3 not in all_terms
+                        ok = (pc.terminal3[0] + shift, pc.terminal3[1]) not in all_terms
+                    if ok and pc.terminal4 is not None:
+                        ok = (pc.terminal4[0] + shift, pc.terminal4[1]) not in all_terms
                     if ok:
                         break
                     shift += self.H_SPACING
@@ -487,6 +565,8 @@ class CircuitLayouter:
                 all_terms.add(pc2.terminal2)
                 if pc2.terminal3 is not None:
                     all_terms.add(pc2.terminal3)
+                if pc2.terminal4 is not None:
+                    all_terms.add(pc2.terminal4)
 
             if not has_overlap:
                 break
@@ -494,9 +574,8 @@ class CircuitLayouter:
     def _shift_component(self, idx: int, shift: int):
         """部品を水平にシフト"""
         pc = self.placed_components[idx]
-        t3 = None
-        if pc.terminal3 is not None:
-            t3 = (pc.terminal3[0] + shift, pc.terminal3[1])
+        t3 = (pc.terminal3[0] + shift, pc.terminal3[1]) if pc.terminal3 else None
+        t4 = (pc.terminal4[0] + shift, pc.terminal4[1]) if pc.terminal4 else None
         self.placed_components[idx] = PlacedComponent(
             component=pc.component,
             x=pc.x + shift,
@@ -505,6 +584,7 @@ class CircuitLayouter:
             terminal1=(pc.terminal1[0] + shift, pc.terminal1[1]),
             terminal2=(pc.terminal2[0] + shift, pc.terminal2[1]),
             terminal3=t3,
+            terminal4=t4,
         )
 
     def _assign_positions(self, parser, sources, series_comps, shunt_comps,
@@ -590,6 +670,8 @@ class CircuitLayouter:
                 all_nodes = [comp.node_pos, comp.node_neg]
                 if comp.node_ctrl:
                     all_nodes.append(comp.node_ctrl)
+                if comp.node_ctrl2:
+                    all_nodes.append(comp.node_ctrl2)
                 for n in all_nodes:
                     if n == node:
                         continue
@@ -696,6 +778,26 @@ class CircuitLayouter:
             rotation = 'R0' if dy > 0 else 'R180'
         else:
             rotation = 'R0'
+
+        # 4端子素子の処理 (E, G, SW, T with control terminals)
+        is_4t = (comp.comp_type in (ComponentType.VCVS, ComponentType.VCCS,
+                                     ComponentType.SWITCH, ComponentType.TLINE)
+                 and comp.node_ctrl != '')
+        if is_4t:
+            t1_pos = (pos_node.x + ox, pos_node.y)
+            if pos_is_gnd:
+                t1_pos = (neg_node.x + ox, self.GND_Y)
+            rotation = 'R0'
+
+            sym_x, sym_y, p1, p2, p3, p4 = \
+                calc_symbol_placement_4t(comp.comp_type, rotation, t1_pos)
+
+            return PlacedComponent(
+                component=comp,
+                x=sym_x, y=sym_y, rotation=rotation,
+                terminal1=p1, terminal2=p2,
+                terminal3=p3, terminal4=p4,
+            )
 
         # 3端子素子の処理
         is_3t = comp.comp_type in (ComponentType.BJT, ComponentType.MOSFET,
@@ -821,6 +923,8 @@ class AscGenerator:
             node_terminal_map.setdefault(comp.node_neg, []).append(pc.terminal2)
             if pc.terminal3 is not None and comp.node_ctrl:
                 node_terminal_map.setdefault(comp.node_ctrl, []).append(pc.terminal3)
+            if pc.terminal4 is not None and comp.node_ctrl2:
+                node_terminal_map.setdefault(comp.node_ctrl2, []).append(pc.terminal4)
 
         ground_nodes = parser.get_ground_nodes()
 

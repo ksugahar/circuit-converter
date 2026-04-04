@@ -108,6 +108,7 @@ _2T_VOLTAGE = _make_offsets(((0, 16), (0, 96)))
 _2T_CURRENT = _make_offsets(((0, 0), (0, 80)))
 _2T_BATTERY = _make_offsets(((0, 16), (0, 96)))
 _2T_DIODE = _make_offsets(((16, 0), (16, 64)))
+_2T_G = _make_offsets(((0, 96), (0, 16)))  # VCCS: pin1(out+)=下, pin2(out-)=上
 
 _3T_NPN = _make_offsets(((64, 0), (0, 48), (64, 96)))
 _3T_PNP = _make_offsets(((64, 0), (0, 48), (64, 96)))
@@ -146,8 +147,8 @@ TERMINAL_OFFSETS = {
     # 制御ソース (2端子出力 + 2端子制御) — 出力端子のみ
     'e':        _2T_VOLTAGE,    # VCVS
     'e2':       _2T_VOLTAGE,
-    'g':        _2T_VOLTAGE,    # VCCS
-    'g2':       _2T_VOLTAGE,
+    'g':        _2T_G,          # VCCS (pin order reversed vs voltage)
+    'g2':       _2T_G,
     'f':        _2T_VOLTAGE,    # CCCS
     'h':        _2T_VOLTAGE,    # CCVS
     'bv':       _2T_VOLTAGE,    # Behavioral voltage
@@ -159,6 +160,25 @@ TERMINAL_OFFSETS = {
 
     # 伝送線路 (4端子→2端子近似)
     'tline':    _2T_CAP,
+}
+
+# 4端子素子のオフセット（出力2端子 + 制御2端子）
+# e.asy:  PIN 0 16, PIN 0 96, PIN -48 32, PIN -48 80  (out+, out-, ctrl+, ctrl-)
+# g.asy:  PIN 0 96, PIN 0 16, PIN -48 32, PIN -48 80  (out-, out+, ctrl+, ctrl-)
+# sw.asy: PIN 0 16, PIN 0 96, PIN -48 80, PIN -48 32  (out+, out-, ctrl-, ctrl+)
+# tline:  PIN -48 -16, PIN -48 16, PIN 48 -16, PIN 48 16
+_4T_E = _make_offsets(((0, 16), (0, 96), (-48, 32), (-48, 80)))
+_4T_G = _make_offsets(((0, 96), (0, 16), (-48, 32), (-48, 80)))
+_4T_SW = _make_offsets(((0, 16), (0, 96), (-48, 80), (-48, 32)))
+_4T_TLINE = _make_offsets(((-48, -16), (-48, 16), (48, -16), (48, 16)))
+
+TERMINAL_OFFSETS_4 = {
+    'e':     _4T_E,
+    'e2':    _4T_E,
+    'g':     _4T_G,
+    'g2':    _4T_G,
+    'sw':    _4T_SW,
+    'tline': _4T_TLINE,
 }
 
 # 3端子素子のオフセット（別テーブル: C/D, B/G, E/S の3点）
