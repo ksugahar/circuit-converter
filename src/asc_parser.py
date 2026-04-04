@@ -114,10 +114,8 @@ _3T_NPN = _make_offsets(((64, 0), (0, 48), (64, 96)))
 _3T_PNP = _make_offsets(((64, 0), (0, 48), (64, 96)))
 _3T_NMOS = _make_offsets(((48, 0), (0, 80), (48, 96)))
 _3T_PMOS = _make_offsets(((48, 0), (0, 80), (48, 96)))
-
-# JFET: NPN と同じピン配置
-_3T_NJF = _3T_NPN
-_3T_PJF = _3T_PNP
+_3T_NJF = _make_offsets(((48, 0), (0, 64), (48, 96)))  # njf.asy実測値
+_3T_PJF = _make_offsets(((48, 0), (0, 64), (48, 96)))   # pjf.asy実測値
 
 # アンカーポイントオフセット（シンボル座標 → 端子座標）
 TERMINAL_OFFSETS = {

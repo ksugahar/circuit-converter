@@ -320,6 +320,12 @@ _TYPE_TO_SYM = {
     ComponentType.VOLTAGE: 'voltage',
     ComponentType.CURRENT: 'current',
     ComponentType.DIODE: 'diode',
+    ComponentType.VCVS: 'e',
+    ComponentType.VCCS: 'g',
+    ComponentType.CCCS: 'f',
+    ComponentType.CCVS: 'h',
+    ComponentType.BEHAVIORAL: 'bv',
+    ComponentType.SWITCH: 'sw',
 }
 
 # 3端子素子のマッピング
@@ -734,13 +740,29 @@ class CircuitLayouter:
         # 並列オフセット適用
         ox = h_offset
 
+        # G(VCCS)素子はpin1(out+)が下(R0時)。通常のvoltage/resはpin1が上。
+        # t1=node_pos→pin1, t2=node_neg→pin2 なので、
+        # G素子でpos=GND → pin1(下)=GND → 自然にR0配置で正しい。
+        # G素子でneg=GND → pin2(上)=GND → 信号が下、GNDが上 → t1/t2入替で対応。
+        is_g_type = comp.comp_type in (ComponentType.VCCS,)
+
         # 分路素子: GND側の座標を信号側ノードの真下に調整
         if neg_is_gnd and not is_source:
-            t1 = (pos_node.x + ox, pos_node.y)
-            t2 = (pos_node.x + ox, self.GND_Y)
+            if is_g_type:
+                # G neg=GND: pin2(上)=GND → swap t1/t2 so pin1(下)=signal
+                t1 = (pos_node.x + ox, self.GND_Y)
+                t2 = (pos_node.x + ox, pos_node.y)
+            else:
+                t1 = (pos_node.x + ox, pos_node.y)
+                t2 = (pos_node.x + ox, self.GND_Y)
         elif pos_is_gnd and not is_source:
-            t1 = (neg_node.x + ox, self.GND_Y)
-            t2 = (neg_node.x + ox, neg_node.y)
+            if is_g_type:
+                # G pos=GND(out+): pin1(下)=GND → R0 natural
+                t1 = (neg_node.x + ox, self.GND_Y)  # pin1(out+)=GND=下
+                t2 = (neg_node.x + ox, neg_node.y)   # pin2(out-)=signal=上
+            else:
+                t1 = (neg_node.x + ox, self.GND_Y)
+                t2 = (neg_node.x + ox, neg_node.y)
         elif is_source:
             # ソース: 信号ノードを上、GNDを下に固定
             if neg_is_gnd:
@@ -765,11 +787,13 @@ class CircuitLayouter:
         if is_source:
             # ソースは常に垂直配置
             if comp.comp_type == ComponentType.VOLTAGE:
-                # 電圧源: R0 = 正端子(上) → 負端子(下)
                 rotation = 'R0'
             else:
-                # 電流源: R180 = 矢印上向き（負端子下→正端子上）
                 rotation = 'R180'
+        elif is_g_type:
+            # G素子: pin1(out+)=下(R0), t1=pin1位置
+            # t1が下(GND_Y)ならR0, t1が上ならR180
+            rotation = 'R0' if t1[1] >= t2[1] else 'R180'
         elif abs(dx) > abs(dy):
             # 水平配置
             rotation = 'R90' if dx > 0 else 'R270'
