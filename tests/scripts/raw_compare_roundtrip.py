@@ -341,36 +341,61 @@ def rebuild_catalog():
     print(f'\nCatalog: {len(catalog)} verified circuits -> {catalog_path}')
 
 
+TWO_TERMINAL_TYPES = {'res', 'cap', 'ind', 'ind2', 'polcap', 'voltage',
+                       'current', 'diode', 'schottky', 'zener', 'led',
+                       'battery'}
+
+
 def collect_targets(args):
     """Collect .asc files based on CLI args."""
     if args.file:
         return [Path(args.file)]
 
+    targets = []
+
+    # Educational
     edu_dir = EXAMPLES_DIR / 'Educational'
-    if not edu_dir.exists():
-        print(f'Educational dir not found: {edu_dir}')
-        return []
+    if edu_dir.exists():
+        for f in sorted(edu_dir.glob('*.asc')):
+            try:
+                info = classify_asc(str(f))
+                types = set(info.get('symbol_types', []))
+                if info.get('num_symbols', 0) > 0 and types:
+                    if args.all_edu:
+                        targets.append(f)
+                    elif types.issubset(TWO_TERMINAL_TYPES):
+                        targets.append(f)
+            except Exception:
+                pass
 
-    files = sorted(edu_dir.glob('*.asc'))
-    if args.all_edu:
-        return files
+    # GitHub repos (2-terminal only)
+    if args.github or args.all:
+        repos_dir = Path(__file__).parent.parent.parent / 'examples' / 'github_repos'
+        if repos_dir.exists():
+            for f in sorted(repos_dir.rglob('*.asc')):
+                try:
+                    info = classify_asc(str(f))
+                    types = set(info.get('symbol_types', []))
+                    if (info.get('num_symbols', 0) > 0 and types
+                            and types.issubset(TWO_TERMINAL_TYPES)):
+                        targets.append(f)
+                except Exception:
+                    pass
 
-    # Default: passive-only
-    passive = []
-    for f in files:
-        try:
-            info = classify_asc(str(f))
-            if info.get('passive_only') and info.get('num_symbols', 0) > 0:
-                passive.append(f)
-        except Exception:
-            pass
-    return passive
+    # Batch limit
+    if args.batch and args.batch < len(targets):
+        targets = targets[:args.batch]
+
+    return targets
 
 
 def main():
     parser = argparse.ArgumentParser(description='.raw比較ラウンドトリップ')
     parser.add_argument('--file', help='単体テスト対象 .asc')
     parser.add_argument('--all-edu', action='store_true', help='全Educational回路')
+    parser.add_argument('--github', action='store_true', help='GitHub repos回路も含む')
+    parser.add_argument('--all', action='store_true', help='全ソース')
+    parser.add_argument('--batch', type=int, help='最大テスト件数')
     parser.add_argument('--rtol', type=float, default=1e-3, help='相対許容差')
     parser.add_argument('--atol', type=float, default=1e-6, help='絶対許容差')
     parser.add_argument('--dry-run', action='store_true')
